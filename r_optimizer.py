@@ -179,7 +179,7 @@ class FrSpecMuon(Optimizer):
                     self.momentum[k] = torch.zeros_like(C)
 
                 # a clumsy attempt at implementing momentum into this (not using this right now)
-                self.momentum[k] = group["momentum"] * self.momentum[k] + (1 - group["momentum"])*Hk
+                self.momentum[k] = group["momentum"] * self.momentum[k] + Hk
 
                 S_pad = torch.zeros_like(Hk)
                 S_pad[:rank, :rank] = S  # current weight core
