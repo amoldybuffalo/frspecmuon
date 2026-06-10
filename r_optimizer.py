@@ -62,7 +62,7 @@ class FrSpecMuon(Optimizer):
         self.r = [None] * riemann_param_count
         self.r_tilde = [None] * riemann_param_count
         self.momentum = [None] * riemann_param_count
-
+        self.velocity = [None] * riemann_param_count
         self.relaxation_tolerance = 0.95 #recommended value 
         
 
@@ -170,23 +170,25 @@ class FrSpecMuon(Optimizer):
 
                 self.r_tilde[k] = self.evolve_discrete_energy(self.r[k], lr, S_r, E)
 
-                #  multiplying the gradient by the appropriate modified learning rate
-                step_sv = -(lr / E) * self.r_tilde[k]
-
-                Hk = U_r @ torch.diag(step_sv) @ Vh_r  # [2r x 2r]
+                Hk = U_r @ torch.diag(self.r[k]) @ Vh_r
 
                 if self.momentum[k] is None:
                     self.momentum[k] = torch.zeros_like(C)
 
-                # a clumsy attempt at implementing momentum into this (not using this right now)
-                self.momentum[k] = group["momentum"] * self.momentum[k] + (1 - group["momentum"]) * Hk
+                beta = group["momentum"]
+                self.momentum[k] = (
+                    beta * self.momentum[k]
+                    + (1 - beta) * Hk
+                )
+
+                
 
                 S_pad = torch.zeros_like(Hk)
                 S_pad[:rank, :rank] = S  # current weight core
 
                 #I believe this is more or less the actual update step
-                Ak = S_pad + self.momentum[k]
-
+                Ak = S_pad - (lr/E) * self.momentum[k]
+                
                 # SVD back into the right basis
                 Ua, Sa, Vha = torch.linalg.svd(Ak, full_matrices=False)
 
