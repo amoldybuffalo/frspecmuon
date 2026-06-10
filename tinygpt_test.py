@@ -11,12 +11,14 @@ tokenizer = Tokenizer()
 
 device = "cuda:0"
 
+# Finetuning TinyGPT2 seems like a reasonable benchmark task
 model = TinyGPT2.from_pretrained(
     "tinygpt2_ckpt_2026_02_18_20_42.pth"
 ).to(device)
 
 non_riemann_model = copy.deepcopy(model)
 
+# Turns the linear layers of the model into LoRAed versions
 riemannize(model, 20, exclusions=[model.lm_head])
 
 riemann_optimizer = FrSpecMuon(
@@ -32,6 +34,7 @@ nonriemann_optimizer = torch.optim.AdamW(
 riemann_losses = []
 non_riemann_losses = []
 
+#I'm just using the KJV bible as a sample finetuning text. I couldn't find any canonical corpus to do this on so I thought the bible would be fine.  
 with open("kjv.txt", "r") as f:
 
     bible = f.read()
@@ -48,13 +51,13 @@ with open("kjv.txt", "r") as f:
         dtype=torch.long,
     ).to(device)
 
-    # Match approximately the same number of updates as before
+    # Epoch lengths are largely arbitrary here
     steps_per_epoch = 4000
 
     model.train()
     non_riemann_model.train()
 
-    for epoch in range(15):
+    for epoch in range(30): 
 
         avg_loss_riemann = 0.0
         avg_loss_nonriemann = 0.0
@@ -64,7 +67,8 @@ with open("kjv.txt", "r") as f:
 
         for step in range(steps_per_epoch):
 
-            # Sample a random window
+            # Sample a random chunk of the text
+            # I believe this is normal in finetuning, but correct me if I'm wrong
             i = torch.randint(
                 512,
                 len(bible_tokens) - 512,
@@ -74,6 +78,7 @@ with open("kjv.txt", "r") as f:
 
             count += 1
 
+            #Evaluate both models on the same data 
             def closure():
 
                 logits, loss, _ = model(
@@ -125,6 +130,10 @@ with open("kjv.txt", "r") as f:
 
         torch.save(model.state_dict(), f"checkpoints_riemann/{epoch}.pt")
         torch.save(non_riemann_model.state_dict(), f"checkpoints_adamw/{epoch}.pt")
+
+
+
+# Testing what the fine tune does at the end. Not strictly part of the actual comparison, just for fun
 my_input = torch.tensor(
     tokenizer.encode("The lord said  "),
     dtype=torch.long,

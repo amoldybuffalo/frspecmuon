@@ -16,7 +16,7 @@ def assert_finite(name, x):
         raise RuntimeError(f"{name} became non-finite")
 
 class FrSpecMuon(Optimizer):
-    def __init__(self, model, lr=1e-2, beta = 0): #no momentum by default
+    def __init__(self, model, lr=1e-3, beta = 0): #no momentum by default
 
 
         param_groups = []
@@ -179,7 +179,7 @@ class FrSpecMuon(Optimizer):
                     self.momentum[k] = torch.zeros_like(C)
 
                 # a clumsy attempt at implementing momentum into this (not using this right now)
-                self.momentum[k] = group["momentum"] * self.momentum[k] + Hk
+                self.momentum[k] = group["momentum"] * self.momentum[k] + (1 - group["momentum"])*Hk
 
                 S_pad = torch.zeros_like(Hk)
                 S_pad[:rank, :rank] = S  # current weight core
