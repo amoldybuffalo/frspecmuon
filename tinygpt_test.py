@@ -24,7 +24,7 @@ riemannize(model, 20, exclusions=[model.lm_head])
 riemann_optimizer = FrSpecMuon(
     model,
     lr=1e-3,
-    beta = 0
+    beta = 0.9
 )
 
 nonriemann_optimizer = torch.optim.AdamW(

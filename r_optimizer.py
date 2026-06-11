@@ -43,9 +43,9 @@ class FrSpecMuon(Optimizer):
             assert "riemann" in group
             if group["riemann"]:
                 group["lr"] = group.get("lr", 0.02)
-                group["momentum"] = group.get("momentum", beta)
+                group["betas"] = (beta, 0.95)
                 group["weight_decay"] = group.get("weight_decay", 0)
-                assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "riemann"])
+                assert set(group.keys()) == set(["params", "lr", "betas", "weight_decay", "riemann"])
                
             else:
                 # defaults
@@ -61,6 +61,8 @@ class FrSpecMuon(Optimizer):
         riemann_param_count =  len([param_group for param_group in param_groups if param_group["riemann"]])
         self.r = [None] * riemann_param_count
         self.r_tilde = [None] * riemann_param_count
+        # self.momentum = [None] * riemann_param_count
+        # self.velocity = [None] * riemann_param_count
         self.momentum = [None] * riemann_param_count
         self.velocity = [None] * riemann_param_count
         self.relaxation_tolerance = 0.95 #recommended value 
@@ -83,12 +85,41 @@ class FrSpecMuon(Optimizer):
         roots = (-b - discriminant.sqrt()) / (2 * a)   
         return roots.clamp(min=0)
 
-    def tangent_core_svd(self, A, B):
+    def tangent_core_svd(self, A, B, beta, beta2, k):
         """
         Exact small-core SVD from Section 4.1.
         """
 
+        #Apply momentum
+        if self.momentum[k] is None:
+            self.momentum[k] = [torch.zeros_like(A.grad), torch.zeros_like(B.grad)]
+            self.velocity[k] = [torch.zeros_like(A.grad), torch.zeros_like(B.grad)]
+    
+        self.momentum[k][0] = (
+                    beta * self.momentum[k][0] 
+                    + (1 - beta) * A.grad
+                )
+
+        self.momentum[k][1] = (
+                    beta * self.momentum[k][1] 
+                    + (1 - beta) * B.grad
+                )
+        
+        self.velocity[k][0] = (
+                     beta2 * self.velocity[k][0]
+                     + (1 - beta2) * A.grad.square()
+                 )
+        self.velocity[k][1] = (
+                     beta2 * self.velocity[k][1]
+                     + (1 - beta2) * B.grad.square()
+                 )
+
+        A_grad_modified = (self.momentum[k][0] / (torch.sqrt(self.velocity[k][0]) + 1e-8))
+        B_grad_modified = (self.momentum[k][1] / (torch.sqrt(self.velocity[k][1]) + 1e-8))
+
         U, Rb = torch.linalg.qr(B, mode="reduced")
+
+        r = U.shape[1]
 
         #A should alread be orthogonal so we don't do a Qr to save time
         V = A.T
@@ -96,8 +127,8 @@ class FrSpecMuon(Optimizer):
 
         # GV = self.right_multiply_by_Rinv(B.grad, Ra)
         #Since Ra should just be the identity we don't bother with dividing by it
-        GV = B.grad
-        GTU = self.right_multiply_by_Rinv((A.grad).T, Rb)
+        GV = B_grad_modified
+        GTU = self.right_multiply_by_Rinv((A_grad_modified).T, Rb)
 
 
         K = U.T @ GV
@@ -109,8 +140,6 @@ class FrSpecMuon(Optimizer):
         Z = GTU - V@V.T @ GTU 
 
         QV, RV = torch.linalg.qr(Z, mode="reduced")
-
-        r = U.shape[1]
 
         # the small core
         C = torch.vstack([
@@ -154,7 +183,8 @@ class FrSpecMuon(Optimizer):
                 rank = A.size()[0]
                 device = A.device
 
-                C, S, U, V, QU, QV, rank = self.tangent_core_svd(A, B)  
+                beta, beta2 = group["betas"]
+                C, S, U, V, QU, QV, rank = self.tangent_core_svd(A, B, beta, beta2, k)  
                 
                     
                 Uc, Sc, Vhc = torch.linalg.svd(C, full_matrices=False)
@@ -170,16 +200,24 @@ class FrSpecMuon(Optimizer):
 
                 self.r_tilde[k] = self.evolve_discrete_energy(self.r[k], lr, S_r, E)
 
-                Hk = U_r @ torch.diag(self.r[k]) @ Vh_r
+                # Hk = U_r @ torch.diag(self.r[k]) @ Vh_r
+                Hk = U_r @ Vh_r
 
-                if self.momentum[k] is None:
-                    self.momentum[k] = torch.zeros_like(C)
+                # if self.momentum[k] is None:
+                #     self.momentum[k] = torch.zeros_like(C)
+                #     self.velocity[k] = torch.zeros_like(C)
 
-                beta = group["momentum"]
-                self.momentum[k] = (
-                    beta * self.momentum[k]
-                    + (1 - beta) * Hk
-                )
+                # beta, beta2 = group["betas"]
+
+                # self.momentum[k] = (
+                #     beta * self.momentum[k]
+                #     + (1 - beta) * Hk
+                # )
+
+                # self.velocity[k] = (
+                #     beta2 * self.velocity[k]
+                #     + (1 - beta2) * (Hk * Hk)
+                # )
 
                 
 
@@ -187,8 +225,9 @@ class FrSpecMuon(Optimizer):
                 S_pad[:rank, :rank] = S  # current weight core
 
                 #I believe this is more or less the actual update step
-                Ak = S_pad - (lr/E) * self.momentum[k]
-                
+                # Ak = S_pad - (lr/E) * (self.momentum[k] / (torch.sqrt(self.velocity[k]) + 1e-8))
+                Ak = S_pad - (lr/E) * Hk
+
                 # SVD back into the right basis
                 Ua, Sa, Vha = torch.linalg.svd(Ak, full_matrices=False)
 
