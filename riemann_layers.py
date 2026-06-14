@@ -3,25 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 
-
-# class FixedRankParameter(nn.Module):
-#     def __init__(self, U, S, V):
-#         super().__init__()
-
-#         self.U = nn.Parameter(U)
-#         self.S = nn.Parameter(S)
-#         self.V = nn.Parameter(V)
-#         self.X = nn.Parameter()
-    
-#     @property
-#     def matrix(self):
-#         #self.X.copy_(U @ S @ V.T)
-#         return X
 
 class RiemannianLinear(nn.Module):
     def __init__(
@@ -35,7 +18,7 @@ class RiemannianLinear(nn.Module):
     ):
         super().__init__()
 
-        self.rank = rank
+        self.rank = min(out_features // 2, rank)
         self.in_features = in_features
         self.out_features = out_features
 
@@ -56,10 +39,8 @@ class RiemannianLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-        # rank-r initialization
-
-        
-        U, _ = torch.linalg.qr(torch.randn(out_features, rank))
+     
+        U, _ = torch.linalg.qr(torch.randn(out_features, rank)) 
         V, _ = torch.linalg.qr(torch.randn(in_features, rank))
         
         self.B = nn.Parameter(U)
@@ -89,11 +70,13 @@ def set_submodule(model, path, new_module):
 
 def riemannize(model, rank, exclusions = []):
     linear_layers = []
+    #Get all non-excluded linear layers
     for name, module in model.named_modules():
         if not module in exclusions:
             if isinstance(module, nn.Linear):
                 linear_layers.append((name, module))
 
+    # Replace them with LoRAed versions
     for layer in linear_layers:
         name, module = layer
         new_layer = RiemannianLinear(module.in_features, module.out_features, rank, module.weight).to("cuda:0")

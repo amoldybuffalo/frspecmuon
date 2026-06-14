@@ -48,17 +48,17 @@ with open("kjv.txt", "r") as f:
     bible = re.sub(r"\;", "", bible)
 
     bible_tokens = torch.tensor(
-        tokenizer.encode(bible),
+        tokenizer.encode(bible[:100000]),
         dtype=torch.long,
     ).to(device)
 
     # Epoch lengths are largely arbitrary here
-    steps_per_epoch = 4000
+    steps_per_epoch = 250
 
     model.train()
     non_riemann_model.train()
 
-    for epoch in range(30): 
+    for epoch in range(20): 
 
         avg_loss_riemann = 0.0
         avg_loss_nonriemann = 0.0

@@ -61,8 +61,6 @@ class FrSpecMuon(Optimizer):
         riemann_param_count =  len([param_group for param_group in param_groups if param_group["riemann"]])
         self.r = [None] * riemann_param_count
         self.r_tilde = [None] * riemann_param_count
-        # self.momentum = [None] * riemann_param_count
-        # self.velocity = [None] * riemann_param_count
         self.momentum = [None] * riemann_param_count
         self.velocity = [None] * riemann_param_count
         self.relaxation_tolerance = 0.95 #recommended value 
@@ -200,25 +198,8 @@ class FrSpecMuon(Optimizer):
 
                 self.r_tilde[k] = self.evolve_discrete_energy(self.r[k], lr, S_r, E)
 
-                # Hk = U_r @ torch.diag(self.r[k]) @ Vh_r
-                Hk = U_r @ Vh_r
-
-                # if self.momentum[k] is None:
-                #     self.momentum[k] = torch.zeros_like(C)
-                #     self.velocity[k] = torch.zeros_like(C)
-
-                # beta, beta2 = group["betas"]
-
-                # self.momentum[k] = (
-                #     beta * self.momentum[k]
-                #     + (1 - beta) * Hk
-                # )
-
-                # self.velocity[k] = (
-                #     beta2 * self.velocity[k]
-                #     + (1 - beta2) * (Hk * Hk)
-                # )
-
+                Hk = U_r @ torch.diag(self.r[k]) @ Vh_r
+                #Hk = U_r @ Vh_r
                 
 
                 S_pad = torch.zeros_like(Hk)
