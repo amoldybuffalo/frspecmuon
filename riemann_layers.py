@@ -80,7 +80,7 @@ def riemannize(model, rank, exclusions = []):
     # Replace them with LoRAed versions
     for layer in linear_layers:
         name, module = layer
-        new_layer = RiemannianLinear(module.in_features, module.out_features, rank, module.weight).to("cuda:0")
+        new_layer = RiemannianLinear(module.in_features, module.out_features, rank, module.weight).to(module.weight.device)
         set_submodule(model, name, new_layer)
 
 
