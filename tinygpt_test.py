@@ -19,12 +19,12 @@ model = TinyGPT2.from_pretrained(
 non_riemann_model = copy.deepcopy(model)
 
 # Turns the linear layers of the model into LoRAed versions
-riemannize(model, 20, exclusions=[model.lm_head])
+riemannize(model, 40, exclusions=[model.lm_head])
 
 riemann_optimizer = FrSpecMuon(
     model,
     lr=1e-3,
-    beta = 0.9
+    betas = (0.9, 0.95)
 )
 
 nonriemann_optimizer = torch.optim.AdamW(
@@ -136,7 +136,7 @@ with open("kjv.txt", "r") as f:
 
 # Testing what the fine tune does at the end. Not strictly part of the actual comparison, just for fun
 my_input = torch.tensor(
-    tokenizer.encode("The lord said  "),
+    tokenizer.encode("The LORD said "),
     dtype=torch.long,
 ).to(device)
 

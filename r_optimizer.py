@@ -16,7 +16,7 @@ def assert_finite(name, x):
         raise RuntimeError(f"{name} became non-finite")
 
 class FrSpecMuon(Optimizer):
-    def __init__(self, model, lr=1e-3, beta = 0): #no momentum by default
+    def __init__(self, model, lr=1e-3, betas = (0,0)): #no momentum by default
 
 
         param_groups = []
@@ -42,8 +42,8 @@ class FrSpecMuon(Optimizer):
         for group in param_groups:
             assert "riemann" in group
             if group["riemann"]:
-                group["lr"] = group.get("lr", 0.02)
-                group["betas"] = (beta, 0.95)
+                group["lr"] = group.get("lr", lr)
+                group["betas"] = group.get("betas", betas)
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "weight_decay", "riemann"])
                

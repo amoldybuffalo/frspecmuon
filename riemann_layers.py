@@ -18,6 +18,7 @@ class RiemannianLinear(nn.Module):
     ):
         super().__init__()
 
+        #Make sure the update isn't actually higher rank than the original weights
         self.rank = min(out_features // 2, rank)
         self.in_features = in_features
         self.out_features = out_features
