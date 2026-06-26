@@ -1,7 +1,7 @@
 from tinygpt import TinyGPT2, TinyGPT2Config, Tokenizer, GPTLanguageModel
 from riemann_layers import riemannize
-from r_optimizer import FrSpecMuon
-
+from r_optimizer import FrSpecMuon, SpecMuon
+from optimizer_benchmark import benchmark_optimizers
 import re
 import copy
 import torch
@@ -9,31 +9,7 @@ import matplotlib.pyplot as plt
 
 tokenizer = Tokenizer()
 
-device = "cuda:0"
 
-# Finetuning TinyGPT2 seems like a reasonable benchmark task
-model = TinyGPT2.from_pretrained(
-    "tinygpt2_ckpt_2026_02_18_20_42.pth"
-).to(device)
-
-non_riemann_model = copy.deepcopy(model)
-
-# Turns the linear layers of the model into LoRAed versions
-riemannize(model, 40, exclusions=[model.lm_head])
-
-riemann_optimizer = FrSpecMuon(
-    model,
-    lr=1e-3,
-    betas = (0.9, 0.95)
-)
-
-nonriemann_optimizer = torch.optim.AdamW(
-    non_riemann_model.parameters(),
-    lr=1e-3,
-)
-
-riemann_losses = []
-non_riemann_losses = []
 
 #I'm just using the KJV bible as a sample finetuning text. I couldn't find any canonical corpus to do this on so I thought the bible would be fine.  
 with open("kjv.txt", "r") as f:
@@ -46,152 +22,83 @@ with open("kjv.txt", "r") as f:
     bible = re.sub(r"\]", "", bible)
     bible = re.sub(r"\,", "", bible)
     bible = re.sub(r"\;", "", bible)
+    adamw_final_losses = []
+    frspecmuon_final_losses = []
+    specmuon_final_losses = []
 
-    bible_tokens = torch.tensor(
-        tokenizer.encode(bible[:100000]),
+    tokens = torch.tensor(
+        tokenizer.encode(bible[:100_000]),
         dtype=torch.long,
     ).to(device)
 
-    # Epoch lengths are largely arbitrary here
-    steps_per_epoch = 250
+ 
+    for i in range(10):
+        device = "cuda:0"
 
-    model.train()
-    non_riemann_model.train()
+        # Finetuning TinyGPT2 seems like a reasonable benchmark task
+        model_frspecmuon = TinyGPT2.from_pretrained(
+            "tinygpt2_ckpt_2026_02_18_20_42.pth"
+        ).to(device)
 
-    for epoch in range(20): 
+        # Turns the linear layers of the model into LoRAed versions
+        riemannize(model_frspecmuon, 60, exclusions=[model_frspecmuon.lm_head])
 
-        avg_loss_riemann = 0.0
-        avg_loss_nonriemann = 0.0
-        count = 0
+        model_specmuon = copy.deepcopy(model_frspecmuon)
+        model_adamw = copy.deepcopy(model_frspecmuon)
 
-        print(f"\nEpoch {epoch + 1}")
 
-        for step in range(steps_per_epoch):
-
-            # Sample a random chunk of the text
-            # I believe this is normal in finetuning, but correct me if I'm wrong
-            i = torch.randint(
-                512,
-                len(bible_tokens) - 512,
-                (),
-                device=device,
-            ).item()
-
-            count += 1
-
-            #Evaluate both models on the same data 
-            def closure():
-
-                logits, loss, _ = model(
-                    bible_tokens[i - 512:i][None, :],
-                    bible_tokens[i:i + 512][None, :],
-                )
-
-                loss.backward()
-
-                return loss
-
-            loss_riemann = riemann_optimizer.step(closure)
-
-            avg_loss_riemann += loss_riemann.item()
-
-            logits, loss_nonriemann, _ = non_riemann_model(
-                bible_tokens[i - 512:i][None, :],
-                bible_tokens[i:i + 512][None, :],
-            )
-
-            loss_nonriemann.backward()
-
-            nonriemann_optimizer.step()
-
-            avg_loss_nonriemann += loss_nonriemann.item()
-
-            nonriemann_optimizer.zero_grad()
-            riemann_optimizer.zero_grad()
-
-            print(
-                f"progress: {100 * count / steps_per_epoch:0.2f}% "
-                f"current loss: {loss_riemann.item():0.4f} "
-                f"avg riemann: {avg_loss_riemann / count:0.4f} "
-                f"avg adamw: {avg_loss_nonriemann / count:0.4f}",
-                end="\r",
-            )
-
-        avg_loss_riemann /= count
-        avg_loss_nonriemann /= count
-
-        riemann_losses.append(avg_loss_riemann)
-        non_riemann_losses.append(avg_loss_nonriemann)
-
-        print(
-            f"\nEpoch {epoch + 1} complete:"
-            f"\n  Riemann avg loss:     {avg_loss_riemann:.4f}"
-            f"\n  AdamW avg loss:       {avg_loss_nonriemann:.4f}"
+        frspecmuon = FrSpecMuon(
+            model_frspecmuon,
+            lr=0.01,
+            betas = (0.9,0.95)
         )
 
-        torch.save(model.state_dict(), f"checkpoints_riemann/{epoch}.pt")
-        torch.save(non_riemann_model.state_dict(), f"checkpoints_adamw/{epoch}.pt")
+        hidden_weights = [p for p in model_specmuon.blocks.parameters() if p.ndim >= 2]
+        hidden_gains_biases = [p for p in model_specmuon.blocks.parameters() if p.ndim < 2]
+        nonhidden_params = [param for param in model_specmuon.lm_head.parameters()]
+        param_groups = [
+            dict(params=hidden_weights, use_muon=True),
+            dict(params=hidden_gains_biases+nonhidden_params, use_muon=False),
+        ]
+
+        specmuon = SpecMuon(param_groups,
+            lr = 0.01,
+            betas = (0.9,0.95)
+        )
+
+
+        adamw = torch.optim.AdamW(
+            model_adamw.parameters(),
+            lr=3e-4,
+            betas = (0.9, 0.95)
+        )    
+
+
+        final_losses = benchmark_optimizers([
+            {"optimizer": frspecmuon, "label": "FrSpecMuon", "model": model_frspecmuon, "uses_closure": True}, 
+            {"optimizer": specmuon, "label": "SpecMuon", "model": model_specmuon, "uses_closure": True},
+            {"optimizer": adamw, "label": "AdamW", "model": model_adamw, "uses_closure": True}
+            ],
+            tokens,
+            epoch_count = 20,
+            steps_per_epoch = 100,
+            graph = True,
+            tag = str(i)
+        )
+        frspecmuon_final_losses.append(final_losses[0].item())
+        specmuon_final_losses.append(final_losses[1].item())
+        adamw_final_losses.append(final_losses[2].item())
+
+    print(f"Final losses FrSpecmuon: {frspecmuon_final_losses}")
+    print(f"Final losses Specmuon: {specmuon_final_losses}")
+    print(f"Final losses AdamW: {adamw_final_losses}")
 
 
 
-# Testing what the fine tune does at the end. Not strictly part of the actual comparison, just for fun
-my_input = torch.tensor(
-    tokenizer.encode("The LORD said "),
-    dtype=torch.long,
-).to(device)
+        
 
-print("\n\nAfter training on bible data (Riemann):")
-print(
-    tokenizer.decode(
-        model.generate(
-            my_input[None, :],
-            100,
-            temperature=1.0,
-        )[0].tolist()
-    )
-)
 
-print("\n\nAfter training on bible data (AdamW):")
-print(
-    tokenizer.decode(
-        non_riemann_model.generate(
-            my_input[None, :],
-            100,
-            temperature=1.0,
-        )[0].tolist()
-    )
-)
 
-plt.figure(figsize=(8, 5))
-
-plt.plot(
-    range(1, len(riemann_losses) + 1),
-    riemann_losses,
-    linewidth=2,
-    label="Riemann",
-)
-
-plt.plot(
-    range(1, len(non_riemann_losses) + 1),
-    non_riemann_losses,
-    linewidth=2,
-    label="AdamW",
-)
-
-plt.xlabel("Epoch")
-plt.ylabel("Average Loss")
-plt.title("Riemann vs AdamW Fine-Tuning")
-plt.grid(True)
-plt.legend()
-
-plt.tight_layout()
-
-plt.savefig(
-    "riemann_vs_nonriemann_loss.png",
-    dpi=300,
-)
-
-plt.show()
 
 
 
