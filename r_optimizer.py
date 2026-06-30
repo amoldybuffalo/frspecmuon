@@ -1,6 +1,6 @@
 import torch
 from torch.optim import Optimizer
-from riemann_layers import RiemannianLinear
+from riemann_layers import RiemannianLinear, RiemannianEmbedding, RiemannConv2d
 import copy
 
 #stolen from the muon repo
@@ -29,7 +29,9 @@ class FrSpecMuon(Optimizer):
 
         #decide whether the parameter gets a low rank muon update or a normal update based on whether it's a riemann layer or not (only riemannian linear layers for now)
         for module in flattened:
-            if isinstance(module, RiemannianLinear):
+            if isinstance(module, RiemannianLinear) or isinstance(module, RiemannConv2d):
+                # print(module)
+                # exit(-1)
                 param_groups.append(dict(params = [module.A, module.B], riemann = True, lr = lr))
                 used_params.extend([id(module.A), id(module.B)])
             else:
@@ -37,7 +39,7 @@ class FrSpecMuon(Optimizer):
                 used_params.extend([id(param) for param in current_parameters])
                 remaining_params.extend(current_parameters)
 
-        param_groups.append(dict(params=remaining_params, riemann=False, lr=lr, betas=(0.9, 0.95), weight_decay=0.01))
+        param_groups.append(dict(params=remaining_params, riemann=False))
 
 
         for group in param_groups:
@@ -51,7 +53,7 @@ class FrSpecMuon(Optimizer):
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
-                group["betas"] = group.get("betas", (0.9, 0.95))
+                group["betas"] = group.get("betas", (0.9, 0.999))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0.01)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "riemann"])
@@ -67,7 +69,7 @@ class FrSpecMuon(Optimizer):
 
         self.momentum_spectral = [None] * riemann_param_count
         self.velocity_spectral = [None] * riemann_param_count
-
+        self.t = 0
         self.relaxation_tolerance = 0.95 #recommended value 
         self.debug = debug
         
@@ -90,7 +92,7 @@ class FrSpecMuon(Optimizer):
         return roots.clamp(min=0)
 
 
-    def apply_momentum(self, A_grad, B_grad, beta1, beta2, k):
+    def apply_momentum(self, A_grad, B_grad, beta1, beta2, k, t):
         if beta1 == beta2 == 0:
             return A_grad, B_grad
 
@@ -118,6 +120,7 @@ class FrSpecMuon(Optimizer):
                  )
 
         return (self.momentum[k][0] / (torch.sqrt(self.velocity[k][0]) + 1e-8)), (self.momentum[k][1] / (torch.sqrt(self.velocity[k][1]) + 1e-8))
+        # return (A_grad / (torch.sqrt(self.velocity[k][0]) + 1e-8)), (B_grad / (torch.sqrt(self.velocity[k][1]) + 1e-8))
     
     def apply_momentum_spectral(self, Hk, beta1, beta2, k):
 
@@ -133,17 +136,17 @@ class FrSpecMuon(Optimizer):
 
 
 
-        return self.momentum_spectral[k] / (torch.sqrt(self.velocity_spectral[k] + 1e-8))
+        return self.momentum_spectral[k] / (torch.sqrt(self.velocity_spectral[k]) + 1e-8)
 
 
 
-    def tangent_core_svd(self, A, B, beta1, beta2, k):
+    def tangent_core_svd(self, A, B, beta1, beta2, k, t):
         """
         Exact small-core SVD from Section 4.1.
         """
 
 
-        # A_grad_modified, B_grad_modified = self.apply_momentum(A.grad, B.grad, beta1, beta2, k)
+        # A_grad_modified, B_grad_modified = self.apply_momentum(A.grad, B.grad, beta1, beta2, k, t)
         A_grad_modified = A.grad
         B_grad_modified = B.grad
 
@@ -187,13 +190,14 @@ class FrSpecMuon(Optimizer):
 
     @torch.no_grad()    
     def step(self, closure=None):
+        self.t += 1
         loss = None
         
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
                 #I choose 1 as my kappa because it seems to work and choosing zero has lead to nan loss in the past (no idea why, the loss should never be negative)
-                E = torch.sqrt(loss + 1).item()
+                E = torch.sqrt(loss+1).item()
 
                 #some debugging steps from earlier
                 if torch.isnan(loss):
@@ -214,10 +218,10 @@ class FrSpecMuon(Optimizer):
                 device = A.device
 
                 beta1, beta2 = group["betas"]
-                C, S, U, V, QU, QV, rank = self.tangent_core_svd(A, B, beta1, beta2, k)  
+                C, S, U, V, QU, QV, rank = self.tangent_core_svd(A, B, beta1, beta2, k, self.t)  
                     
-                Uc, Sc, Vc = torch.svd_lowrank(C, q=rank*2)
-                Vhc = Vc.T
+                Uc, Sc, Vhc = torch.linalg.svd(C, full_matrices=False)
+                
 
                 #truncate the core SVD
                 U_r = Uc[:, :rank]
@@ -301,7 +305,7 @@ class SpecMuon(Optimizer):
             else:
                 # defaults
                 group["lr"] = group.get("lr", 3e-4)
-                group["betas"] = group.get("betas", (0.9, 0.95))
+                group["betas"] = group.get("betas", (0.9, 0.999))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
@@ -323,8 +327,8 @@ class SpecMuon(Optimizer):
         return r / (1+ (lr/2)*(singular_values/energy**2))
        
 
-    def find_relaxation_coefficient(self, old_grad, new_grad, r, r_tilde, E, lr):
-        D = (1/lr) * (new_grad - old_grad).norm()**2  
+    def find_relaxation_coefficient(self, old_weights, new_weights, r, r_tilde, E, lr):
+        D = (1/lr) * (new_weights - old_weights).norm()**2  
         a = ((r_tilde - E)**2).clamp(min=1e-5)          
         b = 2 * E * (r_tilde - E)                      
         c = E**2 - r_tilde**2 - (r_tilde - r)**2 - self.relaxation_tolerance * D  

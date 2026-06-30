@@ -96,6 +96,47 @@ class RiemannianEmbedding(nn.Module):
 
         return base + update
 
+class RiemannConv2d(nn.Module):
+    def __init__(self, conv, rank=8, alpha=1.0):
+        super().__init__()
+
+        self.weight = nn.Parameter(conv.weight, requires_grad = False)
+        
+
+        self.stride, self.padding, self.dilation, self.groups = conv.stride, conv.padding, conv.dilation, conv.groups
+
+
+        if not (conv.bias is None):
+            self.bias = nn.Parameter(conv.bias)
+        else:
+            self.register_parameter("bias", None)
+
+
+        out_c, in_c, kh, kw = self.weight.shape
+        d = in_c * kh * kw
+
+        # A starts on the Stiefel manifold (orthonormal rows)
+        Q, _ = torch.linalg.qr(torch.randn(d, rank))
+        self.A = nn.Parameter(Q.T)
+
+        self.B = nn.Parameter(torch.zeros(out_c, rank))
+        nn.init.normal_(self.B, std=1e-6)
+
+
+
+
+    def forward(self, x):
+        delta = (self.B @ self.A).view_as(self.weight)
+
+        return F.conv2d(
+            x,
+            self.weight + delta,
+            bias=self.bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
 
 def set_submodule(model, path, new_module):
     if "." in path:
@@ -107,7 +148,10 @@ def set_submodule(model, path, new_module):
         child_name = path
 
     parent._modules[child_name] = new_module
-    
+
+
+
+
 @torch.no_grad
 def riemannize(model, rank, exclusions = []):
     linear_layers = []
@@ -133,6 +177,7 @@ def riemannize(model, rank, exclusions = []):
 
 
 from torch import nn
+
 from transformers.pytorch_utils import Conv1D
 from torch.nn.modules.sparse import Embedding
 
@@ -154,8 +199,8 @@ def riemannize_experimental(model, rank, exclusions=None):
         elif isinstance(module, Conv1D):
             layers_to_replace.append((name, module, "conv1d"))
 
-        elif isinstance(module, Embedding):
-            layers_to_replace.append((name, module, "embedding"))
+        elif isinstance(module, nn.Conv2d):
+            layers_to_replace.append((name, module, "conv2d"))
 
     # Replace them
     for name, module, layer_type in layers_to_replace:
@@ -182,19 +227,11 @@ def riemannize_experimental(model, rank, exclusions=None):
                 weight
             ).to(weight.device)
 
-            if module.bias is not None:
+            if hasattr(module, bias) and module.bias is not None:
                 new_layer.bias.data.copy_(module.bias.data)
 
-        elif layer_type =="embedding":  # GPT-2 Conv1D
-            # Conv1D weight shape: (in_features, out_features)
-            weight = module.weight
-
-            new_layer = RiemannianEmbedding(
-                module.num_embeddings,  # in_features
-                module.embedding_dim,  # out_features
-                rank,
-                weight
-            ).to(weight.device)
+        elif layer_type =="conv2d":  
+            new_layer = RiemannConv2d(conv = module, rank = rank).to(module.weight.device)
 
         set_submodule(model, name, new_layer)
 
