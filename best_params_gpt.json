@@ -1,0 +1,1 @@
+{"AdamW": {"lr": 0.0003, "weight_decay": 0.0}, "Muon": {"lr": 0.005, "momentum": 0.95, "weight_decay": 0.01}, "FrSpecMuon": {"lr": 0.1, "weight_decay": 0.0}}

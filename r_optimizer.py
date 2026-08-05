@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch.optim import Optimizer
 from riemann_layers import RiemannianLinear, RiemannianEmbedding, RiemannConv2d
 import copy
@@ -30,8 +31,6 @@ class FrSpecMuon(Optimizer):
         #decide whether the parameter gets a low rank muon update or a normal update based on whether it's a riemann layer or not (only riemannian linear layers for now)
         for module in flattened:
             if isinstance(module, RiemannianLinear) or isinstance(module, RiemannConv2d):
-                # print(module)
-                # exit(-1)
                 param_groups.append(dict(params = [module.A, module.B], riemann = True, lr = lr))
                 used_params.extend([id(module.A), id(module.B)])
             else:
@@ -72,7 +71,8 @@ class FrSpecMuon(Optimizer):
         self.t = 0
         self.relaxation_tolerance = 0.95 #recommended value 
         self.debug = debug
-        
+        self.A_old = [None] * riemann_param_count
+        self.B_old = [None] * riemann_param_count
 
     def right_multiply_by_Rinv(self, G, R):
         return torch.linalg.solve_triangular(R.T, G.T, upper=False).T
@@ -92,7 +92,7 @@ class FrSpecMuon(Optimizer):
         return roots.clamp(min=0)
 
 
-    def apply_momentum(self, A_grad, B_grad, beta1, beta2, k, t):
+    def apply_momentum(self, A_grad, B_grad, beta1, beta2, k, t, use_velocity = False):
         if beta1 == beta2 == 0:
             return A_grad, B_grad
 
@@ -110,19 +110,67 @@ class FrSpecMuon(Optimizer):
                     + (1 - beta1) * B_grad
                 )
         
-        self.velocity[k][0] = (
-                     beta2 * self.velocity[k][0]
-                     + (1 - beta2) * A_grad.square()
-                 )
-        self.velocity[k][1] = (
-                     beta2 * self.velocity[k][1]
-                     + (1 - beta2) * B_grad.square()
-                 )
+        if use_velocity:
+            self.velocity[k][0] = (
+                        beta2 * self.velocity[k][0]
+                        + (1 - beta2) * A_grad.square()
+                    )
+            self.velocity[k][1] = (
+                        beta2 * self.velocity[k][1]
+                        + (1 - beta2) * B_grad.square()
+                    )
 
-        return (self.momentum[k][0] / (torch.sqrt(self.velocity[k][0]) + 1e-8)), (self.momentum[k][1] / (torch.sqrt(self.velocity[k][1]) + 1e-8))
-        # return (A_grad / (torch.sqrt(self.velocity[k][0]) + 1e-8)), (B_grad / (torch.sqrt(self.velocity[k][1]) + 1e-8))
-    
-    def apply_momentum_spectral(self, Hk, beta1, beta2, k):
+            return (self.momentum[k][0] / (torch.sqrt(self.velocity[k][0]) + 1e-8)), (self.momentum[k][1] / (torch.sqrt(self.velocity[k][1]) + 1e-8))
+        else:
+            return self.momentum[k][0], self.momentum[k][1]
+
+    def apply_momentum_nesterov(self, A_grad, B_grad, beta1, beta2, k, t, use_velocity=False):
+        if beta1 == beta2 == 0:
+            return A_grad, B_grad
+
+        if self.momentum[k] is None:
+            self.momentum[k] = [
+                torch.zeros_like(A_grad),
+                torch.zeros_like(B_grad)
+            ]
+            self.velocity[k] = [
+                torch.zeros_like(A_grad),
+                torch.zeros_like(B_grad)
+            ]
+
+        # Momentum buffer
+        self.momentum[k][0] = (
+            beta1 * self.momentum[k][0]
+            + (1 - beta1) * A_grad
+        )
+
+        self.momentum[k][1] = (
+            beta1 * self.momentum[k][1]
+            + (1 - beta1) * B_grad
+        )
+
+        # Nesterov lookahead gradients
+        A_nesterov = A_grad + beta1 * self.momentum[k][0]
+        B_nesterov = B_grad + beta1 * self.momentum[k][1]
+
+        if use_velocity:
+            self.velocity[k][0] = (
+                beta2 * self.velocity[k][0]
+                + (1 - beta2) * A_nesterov.square()
+            )
+            self.velocity[k][1] = (
+                beta2 * self.velocity[k][1]
+                + (1 - beta2) * B_nesterov.square()
+            )
+
+            return (
+                A_nesterov / (torch.sqrt(self.velocity[k][0]) + 1e-8),
+                B_nesterov / (torch.sqrt(self.velocity[k][1]) + 1e-8),
+            )
+
+        return A_nesterov, B_nesterov
+
+    def apply_momentum_spectral(self, Hk, beta1, beta2, k, use_velocity = False):
 
         if beta1 == beta2 == 0:
             return Hk
@@ -132,11 +180,12 @@ class FrSpecMuon(Optimizer):
             self.velocity_spectral[k] = torch.zeros_like(Hk)
 
         self.momentum_spectral[k] = beta1 * self.momentum_spectral[k] + (1 - beta1) * Hk
-        self.velocity_spectral[k] = beta2 * self.velocity_spectral[k] + (1 - beta2) * Hk.square()
-
-
-
-        return self.momentum_spectral[k] / (torch.sqrt(self.velocity_spectral[k]) + 1e-8)
+        
+        if use_velocity:
+            self.velocity_spectral[k] = beta2 * self.velocity_spectral[k] + (1 - beta2) * Hk.square()
+            return self.momentum_spectral[k] / (torch.sqrt(self.velocity_spectral[k]) + 1e-8)
+        else:
+            return self. momentum_spectral[k]
 
 
 
@@ -146,7 +195,7 @@ class FrSpecMuon(Optimizer):
         """
 
 
-        # A_grad_modified, B_grad_modified = self.apply_momentum(A.grad, B.grad, beta1, beta2, k, t)
+        # _, B_grad_modified = self.apply_momentum(A.grad, B.grad, beta1, beta2, k, t, use_velocity=False)
         A_grad_modified = A.grad
         B_grad_modified = B.grad
 
@@ -163,16 +212,21 @@ class FrSpecMuon(Optimizer):
         GV = B_grad_modified
         GTU = self.right_multiply_by_Rinv((A_grad_modified).T, Rb)
 
-
         K = U.T @ GV
 
         Y = GV - U @ K 
 
-        QU, RU = torch.linalg.qr(Y, mode="reduced")
+        Z = GTU - V@V.T @ GTU
 
-        Z = GTU - V@V.T @ GTU 
+
+           
+
+        QU, RU = torch.linalg.qr(Y, mode="reduced")        
 
         QV, RV = torch.linalg.qr(Z, mode="reduced")
+
+
+       
 
         # the small core
         C = torch.vstack([
@@ -219,9 +273,9 @@ class FrSpecMuon(Optimizer):
 
                 beta1, beta2 = group["betas"]
                 C, S, U, V, QU, QV, rank = self.tangent_core_svd(A, B, beta1, beta2, k, self.t)  
-                    
+
+
                 Uc, Sc, Vhc = torch.linalg.svd(C, full_matrices=False)
-                
 
                 #truncate the core SVD
                 U_r = Uc[:, :rank]
@@ -234,27 +288,26 @@ class FrSpecMuon(Optimizer):
 
                 self.r_tilde[k] = self.evolve_discrete_energy(self.r[k], lr, S_r, E)
 
-                Hk = U_r @ torch.diag(self.r_tilde[k]) @ Vh_r
 
-                Hk = self.apply_momentum_spectral(Hk, beta1, beta2, k)
+                Hk = (1 / E) * U_r @ torch.diag(self.r_tilde[k]) @ Vh_r
 
                 S_pad = torch.zeros_like(Hk)
                 S_pad[:rank, :rank] = S  # current weight core
 
                 #I believe this is more or less the actual update step
-                Ak = S_pad * (1 - lr * group["weight_decay"]) - (lr/E) * Hk #We apply weight decay here 
+                Ak = S_pad * (1 - lr * group["weight_decay"]) - (lr) * Hk #We apply weight decay here 
              
                 # SVD back into the right basis
                 Ua, Sa, Vha = torch.linalg.svd(Ak, full_matrices=False)
-
+    
                 # retract back
                 U_new = torch.cat([U, QU], dim=1) @ Ua[:, :rank]
                 S_new = torch.diag(Sa[:rank])
                 V_new = torch.cat([V, QV], dim=1) @ Vha[:rank, :].T
 
-           
-       
 
+
+               
                 B.copy_(U_new @ S_new) # B gets the singular values 
                 A.copy_(V_new.T) # A remains orthogonal
                 X = B @ A 

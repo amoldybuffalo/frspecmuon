@@ -6,102 +6,148 @@ from torchvision import models
 from torchvision.datasets import ImageNet
 from torchvision.transforms import v2
 from imagenetv2_pytorch import ImageNetV2Dataset
-from r_optimizer import FrSpecMuon
-from riemann_layers import riemannize, riemannize_experimental
-from optimizer_benchmark import benchmark_optimizers_resnet
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+# from r_optimizer import FrSpecMuon
+from frspecmuon import FrSpecMuon, FrSpecMuon_USVh
+from riemann_layers import riemannize, split_parameters
+from optimizer_benchmark import benchmark_optimizers_resnet, benchmark_optimizers
+from muon import SingleDeviceMuonWithAuxAdam
+from torch.optim import AdamW
+if __name__ == "__main__":
+    device = "cuda:0"
 
-device = "cuda:0"
+    #########################################################
+    # Pretrained ResNet
+    #########################################################
 
-#########################################################
-# Pretrained ResNet
-#########################################################
+    weights = models.ResNet50_Weights.IMAGENET1K_V1
 
-weights = models.ResNet50_Weights.IMAGENET1K_V1
 
-transform = weights.transforms()
 
-#########################################################
-# ImageNet-V2 dataset
-#########################################################
 
-train_dataset = ImageNetV2Dataset("matched-frequency",
-    transform=transform,
-)
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # Optional if using ImageNet ResNet
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
 
-trainloader = DataLoader(
-    train_dataset,
-    batch_size=128,
-    shuffle=True,
-    num_workers=0,
-    pin_memory=True,
-)
+    train_dataset = datasets.CIFAR100(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transform
+    )
 
-#########################################################
-# Create identical models
-#########################################################
 
-model_frspecmuon_momentum = models.resnet50(weights=weights).to(device)
+    trainloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
-riemannize_experimental(model_frspecmuon_momentum, 20, exclusions = [model_frspecmuon_momentum.fc])
+    #########################################################
+    # Create identical models
+    #########################################################
+    num_classes = 100
+    model = models.resnet50(weights=weights).to(device)
+    model.fc = nn.Linear(model.fc.in_features, num_classes).to(device)
 
-# model_adamw = copy.deepcopy(model_frspecmuon)
-model_frspecmuon_no_momentum = copy.deepcopy(model_frspecmuon_momentum)
 
-frspecmuon_momentum = FrSpecMuon(
-    model_frspecmuon_momentum,
-    lr=3e-4,
-    betas = (0.9,0.999),
-    weight_decay = 0.00
-)
+    riemannize(model, 20, exclusions = [model.fc], mode="USVh")
+    
+    def init_frspecmuon(model, hyperparameters):
+        return FrSpecMuon(model, **hyperparameters)
+    
+    def init_frspecmuon_usvh(model, hyperparameters):
+        return FrSpecMuon_USVh(model, **hyperparameters)
 
-frspecmuon_no_momentum = FrSpecMuon(
-    model_frspecmuon_no_momentum,
-    lr=3e-4,
-    betas = (0,0),
-    weight_decay = 0.00
-)
+    def init_muon(model, hyperparameters):
+        riemann_params, other_params = split_parameters(model)
 
-# adamw = torch.optim.AdamW(
-#     model_adamw.parameters(),
-#     lr=3e-4,
-#     betas = (0.0,0.0)
-# )   
+        param_groups = [
+            dict(params=riemann_params, use_muon=True,
+                 lr=hyperparameters["lr"], weight_decay=hyperparameters["weight_decay"], momentum=hyperparameters["momentum"]),
+            dict(params=other_params, use_muon=False,
+                 lr=3e-4, betas=(0.9, 0.999), weight_decay=0.01),
+        ]
 
-#########################################################
-# Loss
-#########################################################
+        return SingleDeviceMuonWithAuxAdam(param_groups)
 
-criterion = nn.CrossEntropyLoss()
 
-#########################################################
-# Optimizers
-#########################################################
+    def init_adamw(model, hyperparameters):
+        return torch.optim.AdamW(model.parameters(), **hyperparameters)
 
-optimizer_configs = [
-    {
-        "model": model_frspecmuon_momentum,
-        "optimizer": frspecmuon_momentum,
-        "label": "FrSpecMuon (momentum)",
-        "uses_closure": True,
-    },
-    {
-        "model": model_frspecmuon_no_momentum,
-        "optimizer": frspecmuon_no_momentum,
-        "label": "FrSpecmuon (no momentum)",
-        "uses_closure": True,
-    },
-]
 
-#########################################################
-# Benchmark
-#########################################################
+    criterion = nn.CrossEntropyLoss()
 
-benchmark_optimizers_resnet(
-    optimizer_configs,
-    trainloader,
-    criterion,
-    device=device,
-    epoch_count=10,
-    graph=True,
-    tag="imagenetv2",
-)
+    def loss_fn(model, batch):
+        images, labels = batch
+        images = images.to(device)
+        labels = labels.to(device)
+        return criterion(model(images), labels)
+ 
+
+
+    #########################################################
+    # Loss
+    #########################################################
+
+    criterion = nn.CrossEntropyLoss()
+
+    #########################################################
+    # Optimizers
+    #########################################################
+
+    optimizer_configs = [
+        {
+            "hyperparameters": {
+                "lr": 0.007,
+                "q_multiplier": 2,
+                "relaxation_tolerance": 0.95,
+                "weight_decay":0.00
+            },
+
+            "label": "FrSpecMuon",
+            "optimizer_fn": init_frspecmuon_usvh,
+            "uses_closure": True,
+        },
+        {
+            "hyperparameters": {
+                "lr": 0.0003,
+                "betas": (0.9, 0.999),
+                "weight_decay":0.00
+          
+            },
+            "label": "AdamW",
+            "optimizer_fn": init_adamw,
+            "uses_closure": True,
+        },
+
+        {
+            "hyperparameters": {
+                "lr": 0.001,
+                "momentum":0.9,
+                "weight_decay":0.00
+            },
+            "label": "Muon",
+            "optimizer_fn": init_muon,
+            "uses_closure": True,
+        },
+    ]
+
+    #########################################################
+    # Benchmark
+    #########################################################
+
+    benchmark_optimizers(
+        model,
+        optimizer_configs,
+        trainloader,
+        loss_fn,
+        device=device,
+        epoch_count=30,
+        graph=True,
+        graph_type = "epochs",
+        graph_output_dir="graphs/resnet",
+        tag="",
+    )     
