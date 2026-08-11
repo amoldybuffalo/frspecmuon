@@ -212,7 +212,7 @@ class RiemannConv2d_USVh(nn.Module):
 
 
         self.U = nn.Parameter(U)
-        self.S = nn.Parameter(torch.zeros(rank, rank))
+        self.S = nn.Parameter(torch.diag(torch.ones(rank)))
         self.Vh = nn.Parameter(V.T)
 
 

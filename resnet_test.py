@@ -9,9 +9,9 @@ from imagenetv2_pytorch import ImageNetV2Dataset
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 # from r_optimizer import FrSpecMuon
-from frspecmuon import FrSpecMuon, FrSpecMuon_USVh
+from frspecmuon import FrSpecMuon, FrSpecMuon_with_momentum
 from riemann_layers import riemannize, split_parameters
-from optimizer_benchmark import benchmark_optimizers_resnet, benchmark_optimizers
+from optimizer_benchmark import benchmark_optimizers
 from muon import SingleDeviceMuonWithAuxAdam
 from torch.optim import AdamW
 if __name__ == "__main__":
@@ -58,8 +58,9 @@ if __name__ == "__main__":
     def init_frspecmuon(model, hyperparameters):
         return FrSpecMuon(model, **hyperparameters)
     
-    def init_frspecmuon_usvh(model, hyperparameters):
-        return FrSpecMuon_USVh(model, **hyperparameters)
+    def init_frspecmuon_momentum(model, hyperparameters):
+        return FrSpecMuon_with_momentum(model, **hyperparameters)
+
 
     def init_muon(model, hyperparameters):
         riemann_params, other_params = split_parameters(model)
@@ -101,38 +102,53 @@ if __name__ == "__main__":
     optimizer_configs = [
         {
             "hyperparameters": {
-                "lr": 0.007,
+                "lr": 0.01,
                 "q_multiplier": 2,
                 "relaxation_tolerance": 0.95,
-                "weight_decay":0.00
+                "weight_decay":0.00,
             },
 
             "label": "FrSpecMuon",
-            "optimizer_fn": init_frspecmuon_usvh,
-            "uses_closure": True,
-        },
-        {
-            "hyperparameters": {
-                "lr": 0.0003,
-                "betas": (0.9, 0.999),
-                "weight_decay":0.00
-          
-            },
-            "label": "AdamW",
-            "optimizer_fn": init_adamw,
+            "optimizer_fn": init_frspecmuon,
             "uses_closure": True,
         },
 
         {
             "hyperparameters": {
-                "lr": 0.001,
-                "momentum":0.9,
-                "weight_decay":0.00
+                "lr": 0.01,
+                "q_multiplier": 2,
+                "relaxation_tolerance": 0.95,
+                "weight_decay":0.00,
+                "betas": (0.9, 0.99)
             },
-            "label": "Muon",
-            "optimizer_fn": init_muon,
+
+            "label": "FrSpecMuon (with momentum)",
+            "optimizer_fn": init_frspecmuon_momentum,
             "uses_closure": True,
         },
+
+        # {
+        #     "hyperparameters": {
+        #         "lr": 0.0003,
+        #         "betas": (0.9, 0.999),
+        #         "weight_decay":0.00
+          
+        #     },
+        #     "label": "AdamW",
+        #     "optimizer_fn": init_adamw,
+        #     "uses_closure": True,
+        # },
+
+        # {
+        #     "hyperparameters": {
+        #         "lr": 0.001,
+        #         "momentum":0.9,
+        #         "weight_decay":0.00
+        #     },
+        #     "label": "Muon",
+        #     "optimizer_fn": init_muon,
+        #     "uses_closure": True,
+        # },
     ]
 
     #########################################################
@@ -149,5 +165,5 @@ if __name__ == "__main__":
         graph=True,
         graph_type = "epochs",
         graph_output_dir="graphs/resnet",
-        tag="",
+        tag="second_momentum_only_decreased_lr",
     )     

@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch.optim import Optimizer
+import numpy as np
 from riemann_layers import RiemannianLinear, RiemannConv2d, RiemannConv2d_USVh, RiemannianLinear_USVh
 import copy
 
@@ -303,7 +304,7 @@ class FrSpecMuon(Optimizer):
         riemann_param_count =  len([param_group for param_group in param_groups if param_group["riemann"]])
         self.r = [None] * riemann_param_count
         self.r_tilde = [None] * riemann_param_count
-        self.D = [None] * riemann_param_count
+        self.old_weights = [None] * riemann_param_count
 
         self.t = 0
         
@@ -312,8 +313,8 @@ class FrSpecMuon(Optimizer):
         return r / (1+ (lr/2)*(singular_values/energy**2))
        
 
-    def find_relaxation_coefficient(self, D, r, r_tilde, E, lr):
-        D = (1/lr) * (new_grad - old_grad).norm()**2 
+    def find_relaxation_coefficient(self, new_weights, old_weights, r, r_tilde, E, lr):
+        D = (1/lr) * (new_weights - old_weights).norm()**2 
         a = ((r_tilde - E)**2).clamp(min=1e-5)          
         b = 2 * E * (r_tilde - E)                      
         c = E**2 - r_tilde**2 - (r_tilde - r)**2 - self.relaxation_tolerance * D 
@@ -388,7 +389,13 @@ class FrSpecMuon(Optimizer):
                 k += 1
                 params = group["params"]
                 U, S, Vh = params     
-                 = U @ S @ Vh          
+                X = U @ S @ Vh
+
+                if self.old_weights[k] != None:
+                    zeta = self.find_relaxation_coefficient(X, self.old_weights[k], self.r[k], self.r_tilde[k], E, lr)
+                    self.r[k] = self.r_tilde[k] * zeta + (1 - zeta) * E 
+
+                self.old_weights[k] = X          
     
                 rank = Vh.size()[0]
 
@@ -434,15 +441,8 @@ class FrSpecMuon(Optimizer):
                 U.copy_(U_new) 
                 S.copy_(S_new)
                 Vh.copy_(V_new.T)
-
-
-            
-                X = U @ S @ Vh
-
                 
-                # relaxation step
                 
-                self.r[k] = self.r_tilde[k] * zeta + (1 - zeta) * E 
 
             else:
                 # otherwise just do a normal adam update as usual
@@ -523,22 +523,47 @@ class FrSpecMuon_with_momentum(Optimizer):
         riemann_param_count =  len([param_group for param_group in param_groups if param_group["riemann"]])
         self.r = [None] * riemann_param_count
         self.r_tilde = [None] * riemann_param_count
+        self.D = [None] * riemann_param_count
         self.t = 0
 
 
-    def evolve_discrete_energy(self, r, lr, singular_values, energy):
-        return r / (1+ (lr/2)*(singular_values/energy**2))
-       
+    def find_relaxation_coefficient(
+        self,
+        r_next: torch.Tensor,
+        e_next: torch.Tensor,
+        dissipation: torch.Tensor | float,
+        psi: float = 1.0,
+    ) -> torch.Tensor:
+        if not 0.0 <= psi <= 1.0:
+            raise ValueError("psi must be in [0, 1].")
 
-    def find_relaxation_coefficient(self, old_grad, new_grad, r, r_tilde, E, lr):
-        D = (1/lr) * (new_grad - old_grad).norm()**2 
-        a = ((r_tilde - E)**2).clamp(min=1e-5)          
-        b = 2 * E * (r_tilde - E)                      
-        c = E**2 - r_tilde**2 - (r_tilde - r)**2 - self.relaxation_tolerance * D 
+        z = e_next - r_next
 
-        discriminant = (b**2 - 4*a*c).clamp(min=0)   
-        roots = (-b - discriminant.sqrt()) / (2 * a)   
-        return roots.clamp(min=0)
+        a = torch.sum(z * z)
+
+    
+        b = 2.0 * torch.sum(r_next * z)
+
+        budget = psi * dissipation
+
+        # If e_next == r_next, we can move all the way to it.
+        if torch.all(a == 0):
+            return torch.ones(
+                e_next.size(),
+                dtype=r_next.dtype,
+                device=r_next.device,
+            )
+
+        discriminant = b * b + 4.0 * a * budget
+
+        # Numerical roundoff can make the discriminant slightly negative.
+        discriminant = torch.clamp(discriminant, min=0.0)
+
+        lambda_max = (
+            -b + torch.sqrt(discriminant)
+        ) / (2.0 * a)
+
+        return torch.clamp(lambda_max, max=1.0)
 
 
     def tangent_core_svd(self, U, S, Vh):
@@ -592,17 +617,24 @@ class FrSpecMuon_with_momentum(Optimizer):
                 k += 1
                 params = group["params"]
                 beta1, beta2 = group["betas"]
+               
                 
-
-
                 U, S, Vh = params
-                state = self.state[S]
-
-                old_X = U @ S @ Vh          
-    
-                rank = Vh.size()[0]
-
                 device = Vh.device
+                state = self.state[S]    
+                rank = Vh.size()[0]
+                q = int(rank * self.q_multiplier)
+                
+                #We do the relaxation step for the last cycle here since we have access to the new energy E^(k+1)
+                e = torch.full((q,), E, device=device)
+
+                if self.D[k] != None:
+                    #find the relaxation coefficient lambda^k
+                    lambda_coeff = self.find_relaxation_coefficient(e_next = e, r_next = self.r_tilde[k], dissipation=self.D[k], psi=self.relaxation_tolerance)
+                    #the relaxation step
+                    self.r[k] = self.r_tilde[k] + lambda_coeff * (e - self.r_tilde[k]) 
+                    
+                
 
                 beta1, beta2 = group["betas"]
 
@@ -610,59 +642,87 @@ class FrSpecMuon_with_momentum(Optimizer):
            
                 Uc, Sc, Vhc = torch.linalg.svd(C, full_matrices=False)
 
-                q = int(rank * self.q_multiplier)
+                
                 #truncate the core SVD
                 U_r = Uc[:, :q]
                 S_r = Sc[:q]
                 Vh_r = Vhc[:q, :]
 
-             
+                    
+                if not "velocity_buffer" in state:
+                    v_transported = torch.zeros((q), device=device)
 
-                
+                else:
+                    U_overlap = U_r.T @ state["prev_U_r"]
+                    V_overlap = Vh_r @ state["prev_Vh_r"].T
+                    C = U_overlap * V_overlap
+                    v_transported = (C*C) @ state["velocity_buffer"]
 
-                Q = U_r @ Vh_r
-                g = S_r / E
-                a = 1/S_r
+                v = beta2 * v_transported  + (1 - beta2) * S_r**2
+                v_corrected = v / (1 - beta2)
 
 
+                state["prev_U_r"] = U_r
+                state["prev_Vh_r"] = Vh_r
+
+                g = S_r / E # diagonal of G
+
+                a = 1 / (v_corrected + 1e-10) #Diagonal of A^K_M
+
+
+                #initialize r to E_0
                 if self.r[k] is None:
                     self.r[k] = torch.full((q,), E).to(device)
 
                 if not "momentum_buffer" in state:
-                    state["momentum_buffer"] = torch.zeros(q, device=device)
+                    state["momentum_buffer"] = torch.zeros((q, q), device=device)
                 
-
-                Z = state["momentum_buffer"].clone()
-
-                z = torch.tensor([torch.inner(Z, col) for col in Q.T], device=device)
-
-    
-         
-                p_hat =  (1/torch.sqrt(a)) * z
-
-            
-
-                denom = S_r + (lr / 2) * g.square()
-                num = beta1 * p_hat - lr * self.r[k] * g 
-
-                s = num / denom 
-
-               
-                p = S_r * s
-
-                d = 0.5 * g * s
-
-                state["momentum_buffer"] = torch.sqrt(a) * p * Q.sum(dim=1) 
-
-                tau = (torch.norm(Z)**2 - torch.norm(Z.product(dim=0))**2)/2 * lr
-
-                self.r_tilde[k] = self.r[k] + d
-                
-                D_1 = (torch.norm(Z) - torch.norm(state["momentum_buffer"]))/ 2 * lr + (torch.norm(self.r[k])**2 - torch.norm(self.r_tilde[k]))
               
                 
-                H = U_r @ torch.diag(s) @ Vh_r
+                #rename for clarity
+                Z = state["momentum_buffer"]
 
+                #z^k_i = <Z^k, Q^k_i> 
+                ZV = Z @ Vh_r.T          
+                z  = torch.sum(U_r * ZV, dim=0) 
+
+         
+                p_hat =  (1/torch.sqrt(a)) * z # p_hat = (A^k_M)^(-1/2) z^k 
+
+
+                #equation (39) solved for s^(k+1)
+                denom = S_r + (lr / 2) * g.square() 
+                num = beta1 * p_hat - lr * self.r[k] * g 
+                s_next = num / denom 
+                ##################################
+               
+                p_next = S_r * s_next #P^(k+1) = (A^k_M)^(-1) s^(k+1)
+                
+                # from (7)
+                d_next = 0.5 * g * s_next
+                self.r_tilde[k] = self.r[k] + d_next
+                ##########
+
+                state["momentum_buffer"] = U_r @ torch.diag(torch.sqrt(a) * p_next) @ Vh_r 
+                state["velocity_buffer"] = v
+                #calculate Tau
+                T = (torch.norm(Z)**2 - torch.sum(z ** 2) )/ (2 * lr)
+
+                
+                
+                self.D[k] = (
+                    T
+                    + torch.sum((p_next - beta1 * p_hat) * a * (p_next - beta1 * p_hat))
+                    / (2 * lr)
+                    + (1 - beta1**2)
+                    * torch.sum(p_hat * a * p_hat)
+                    / (2 * lr)
+                    + torch.sum(d_next ** 2)
+                )
+
+                
+                H = U_r @ torch.diag(s_next) @ Vh_r #the update
+    
 
                 S_pad = torch.zeros_like(H)
               
@@ -671,10 +731,7 @@ class FrSpecMuon_with_momentum(Optimizer):
                 #I believe this is more or less the actual update step
                 A = S_pad * (1 - lr * group["weight_decay"]) + H #We apply weight decay here 
 
-        
 
-                zeta = self.find_relaxation_coefficient(old_X, X, self.r[k], self.r_tilde[k], E, lr) 
-                self.r[k] = self.r_tilde[k] + zeta * (E - self.r_tilde[k]) 
 
                 # SVD back into the right basis
                 Ua, Sa, Vha = torch.linalg.svd(A, full_matrices=False)
@@ -689,13 +746,6 @@ class FrSpecMuon_with_momentum(Optimizer):
                 U.copy_(U_new) 
                 S.copy_(S_new)
                 Vh.copy_(V_new.T)
-
-
-            
-                X = U @ S @ Vh
-
-                # relaxation step
-                
 
             else:
                 # otherwise just do a normal adam update as usual
