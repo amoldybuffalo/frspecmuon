@@ -618,8 +618,10 @@ class FrSpecMuon_with_momentum(Optimizer):
                 params = group["params"]
                 beta1, beta2 = group["betas"]
                
-                
+
                 U, S, Vh = params
+                
+
                 device = Vh.device
                 state = self.state[S]    
                 rank = Vh.size()[0]
@@ -639,7 +641,10 @@ class FrSpecMuon_with_momentum(Optimizer):
                 beta1, beta2 = group["betas"]
 
                 C, S, U, V, QU, QV, rank = self.tangent_core_svd(U, S, Vh)  
-           
+                
+                UQU = torch.cat([U, QU], dim=1)
+                VQV = torch.cat([V, QV], dim=1)
+
                 Uc, Sc, Vhc = torch.linalg.svd(C, full_matrices=False)
 
                 
@@ -648,39 +653,46 @@ class FrSpecMuon_with_momentum(Optimizer):
                 S_r = Sc[:q]
                 Vh_r = Vhc[:q, :]
 
-                    
+                U_r_amb = UQU @ U_r
+                Vh_r_amb =  Vh_r @ VQV.T
+
+               
+
                 if not "velocity_buffer" in state:
                     v_transported = torch.zeros((q), device=device)
 
                 else:
-                    U_overlap = U_r.T @ state["prev_U_r"]
-                    V_overlap = Vh_r @ state["prev_Vh_r"].T
-                    C = U_overlap * V_overlap
-                    v_transported = (C*C) @ state["velocity_buffer"]
+                    U_overlap = U_r_amb.T @ state["prev_U_r_amb"]
+                    V_overlap = Vh_r_amb @ state["prev_Vh_r_amb"].T
+                    C_m = U_overlap * V_overlap
+                    v_transported = (C_m*C_m) @ state["velocity_buffer"]
+                 
 
                 v = beta2 * v_transported  + (1 - beta2) * S_r**2
-                v_corrected = v / (1 - beta2)
+                v_corrected = v / (1 - beta2**self.t)
 
 
-                state["prev_U_r"] = U_r
-                state["prev_Vh_r"] = Vh_r
+                state["prev_U_r_amb"] = U_r_amb
+                state["prev_Vh_r_amb"] = Vh_r_amb
 
                 g = S_r / E # diagonal of G
 
-                a = 1 / (v_corrected + 1e-10) #Diagonal of A^K_M
-
+                a = 1 / torch.sqrt(v_corrected + 1e-10) #Diagonal of A^K_M
 
                 #initialize r to E_0
                 if self.r[k] is None:
                     self.r[k] = torch.full((q,), E).to(device)
 
                 if not "momentum_buffer" in state:
-                    state["momentum_buffer"] = torch.zeros((q, q), device=device)
+                    state["momentum_buffer"] = torch.zeros((2 * rank, 2 * rank), device=device)
+                    Z = state["momentum_buffer"]
+                else:
+                    #Transport to the correct basis 
+                    Z = U_overlap @ state["momentum_buffer"] @ V_overlap.T
                 
               
                 
-                #rename for clarity
-                Z = state["momentum_buffer"]
+                
 
                 #z^k_i = <Z^k, Q^k_i> 
                 ZV = Z @ Vh_r.T          
@@ -688,15 +700,16 @@ class FrSpecMuon_with_momentum(Optimizer):
 
          
                 p_hat =  (1/torch.sqrt(a)) * z # p_hat = (A^k_M)^(-1/2) z^k 
-
+               
 
                 #equation (39) solved for s^(k+1)
-                denom = S_r + (lr / 2) * g.square() 
-                num = beta1 * p_hat - lr * self.r[k] * g 
+                
+                num = beta1 * p_hat - lr * self.r[k] * g
+                denom = 1/a + (lr / 2) * g.square()  
                 s_next = num / denom 
                 ##################################
                
-                p_next = S_r * s_next #P^(k+1) = (A^k_M)^(-1) s^(k+1)
+                p_next = s_next / a #P^(k+1) = (A^k_M)^(-1) s^(k+1)
                 
                 # from (7)
                 d_next = 0.5 * g * s_next
@@ -720,14 +733,21 @@ class FrSpecMuon_with_momentum(Optimizer):
                     + torch.sum(d_next ** 2)
                 )
 
-                
                 H = U_r @ torch.diag(s_next) @ Vh_r #the update
-    
 
+
+                             
                 S_pad = torch.zeros_like(H)
-              
+
                 S_pad[:rank, :rank] = S  # current weight core
 
+
+                # if self.t % 20 == 0 and k == 0:
+                #     print(
+                #         f"r/E: {self.r[k][0]/E}",
+                #         end = "\n\n\n\n"
+                #     )
+               
                 #I believe this is more or less the actual update step
                 A = S_pad * (1 - lr * group["weight_decay"]) + H #We apply weight decay here 
 
@@ -738,9 +758,9 @@ class FrSpecMuon_with_momentum(Optimizer):
                
     
                 # retract back
-                U_new = torch.cat([U, QU], dim=1) @ Ua[:, :rank]
+                U_new = UQU @ Ua[:, :rank]
                 S_new = torch.diag(Sa[:rank])
-                V_new = torch.cat([V, QV], dim=1) @ Vha[:rank, :].T
+                V_new = VQV @ Vha[:rank, :].T
 
 
                 U.copy_(U_new) 

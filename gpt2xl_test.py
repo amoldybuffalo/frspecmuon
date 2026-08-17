@@ -13,9 +13,9 @@ from imagenetv2_pytorch import ImageNetV2Dataset
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 # from r_optimizer import FrSpecMuon
-from frspecmuon import FrSpecMuon, FrSpecMuon_USVh, FrSpecMuon_with_momentum
+from frspecmuon import FrSpecMuon, FrSpecMuon_with_momentum
 from riemann_layers import riemannize, split_parameters
-from optimizer_benchmark import benchmark_optimizers_resnet, benchmark_optimizers
+from optimizer_benchmark import  benchmark_optimizers
 from muon import SingleDeviceMuonWithAuxAdam
 from torch.optim import AdamW
 
@@ -47,7 +47,7 @@ tokenizer.pad_token = tokenizer.eos_token
 
 device = "cuda:0"
 
-def get_gpt_trainloader(model_name, text_file, steps_per_epoch = 100):
+def get_gpt_trainloader(model_name, text_file, steps_per_epoch = 100, dataset_token_count = None,):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
@@ -55,10 +55,10 @@ def get_gpt_trainloader(model_name, text_file, steps_per_epoch = 100):
     with open(text_file, "r") as f:
         text = f.read()
 
-    tokens = tokenizer(text,  return_tensors="pt")["input_ids"][0]    
+    tokens = tokenizer(text,  return_tensors="pt")["input_ids"][0]
 
     trainloader = DataLoader(
-    RandomLanguageModelDataset(tokens, 1024, steps_per_epoch),
+    RandomLanguageModelDataset(tokens, 1024, 1, is_random = False),
     batch_size=1,
     )
 
@@ -78,8 +78,8 @@ def get_gpt_model(model_name):
 def init_frspecmuon(model, hyperparameters):
         return FrSpecMuon(model, **hyperparameters)
 
-def init_frspecmuon_usvh(model, hyperparameters):
-        return FrSpecMuon_USVh(model, **hyperparameters)
+# def init_frspecmuon_usvh(model, hyperparameters):
+#         return FrSpecMuon_USVh(model, **hyperparameters)
 
 
 def init_frspecmuon_momentum(model, hyperparameters):
@@ -131,43 +131,55 @@ if __name__ == "__main__":
     optimizer_configs = [
         {
             "hyperparameters": {
+                "lr": 0.07,
+                "weight_decay":0.00,
+                "betas": (0.9, 0.999)
+            },
+
+            "label": "FrSpecMuon (momentum)",
+            "optimizer_fn": init_frspecmuon_momentum,
+            "uses_closure": True,
+        },
+
+        {
+            "hyperparameters": {
                 "lr": 0.1,
                 "weight_decay":0.00
             },
 
             "label": "FrSpecMuon",
-            "optimizer_fn": init_frspecmuon_momentum,
+            "optimizer_fn": init_frspecmuon,
             "uses_closure": True,
         },
-        {
-            "hyperparameters": {
-                "lr": 0.0003,
-                "betas": (0.9, 0.999),
-                "weight_decay": 0.0
+        # {
+        #     "hyperparameters": {
+        #         "lr": 0.0003,
+        #         "betas": (0.9, 0.999),
+        #         "weight_decay": 0.0
           
-            },
-            "label": "AdamW",
-            "optimizer_fn": init_adamw,
-            "uses_closure": True,
-        },
+        #     },
+        #     "label": "AdamW",
+        #     "optimizer_fn": init_adamw,
+        #     "uses_closure": True,
+        # },
 
-        {
-            "hyperparameters": {
-                "lr": 0.001,
-                "momentum":0.95,
-                "weight_decay":0.01
-            },
-            "label": "Muon",
-            "optimizer_fn": init_muon,
-            "uses_closure": True,
-        },
+        # {
+        #     "hyperparameters": {
+        #         "lr": 0.001,
+        #         "momentum":0.95,
+        #         "weight_decay":0.01
+        #     },
+        #     "label": "Muon",
+        #     "optimizer_fn": init_muon,
+        #     "uses_closure": True,
+        # },
     ]
 
     #########################################################
     # Benchmark
     #########################################################
 
-    trainloader = get_gpt_trainloader(model_name, "romeo_and_juliet.txt", 250)
+    trainloader = get_gpt_trainloader(model_name, "romeo_and_juliet.txt", 1, 1025)
     model = get_gpt_model(model_name)
 
     benchmark_optimizers(
@@ -180,7 +192,7 @@ if __name__ == "__main__":
         graph=True,
         graph_type = "epochs",
         graph_output_dir="graphs/gpt",
-        tag="GPT_TEST",
+        tag="momentum_test",
     )   
 
 
